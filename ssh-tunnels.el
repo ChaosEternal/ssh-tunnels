@@ -85,7 +85,7 @@
   :type 'number
   :group 'ssh-tunnels)
 
-(defcustom ssh-tunnels-host-width 50
+(defcustom ssh-tunnels-host-width 20
   "Width of tunnel host column in the ssh tunnels buffer."
   :type 'number
   :group 'ssh-tunnels)
@@ -172,14 +172,18 @@ become irrelevant if `ssh-tunnels-configurations' changes.")
     (setq tabulated-list-format
           (vector `("S" 1 t)
                   `("Name" ,name-width t)
+		  `("Type" 8 t)
                   `("LPort" ,local-port-width ssh-tunnels--lport> :right-align t)
                   `("Host" ,host-width t)
                   `("RPort" ,remote-port-width ssh-tunnels--rport> :right-align t)
-                  `("Login" ,login-width t))))
+                  `("Login" ,login-width t)
+		  `("Options" ,login-width t))))
   (setq tabulated-list-use-header-line ssh-tunnels-use-header-line)
   (let ((entries '()))
     (dolist (tunnel ssh-tunnels-configurations)
       (let* ((name (ssh-tunnels--property tunnel :name))
+	     (tunnel-type (ssh-tunnels--property tunnel :tunnel-type))
+	     (options (or (ssh-tunnels--property tunnel :options) ""))
              (local-port (ssh-tunnels--property tunnel :local-port))
              (host (ssh-tunnels--property tunnel :host))
              (remote-port (ssh-tunnels--property tunnel :remote-port))
@@ -187,10 +191,12 @@ become irrelevant if `ssh-tunnels-configurations' changes.")
         (push (list tunnel
                     (vector (if (ssh-tunnels--check tunnel) "R" " ")
                             (ssh-tunnels--pretty-name name)
+			    tunnel-type
                             (number-to-string local-port)
                             host
                             (number-to-string remote-port)
-                            login))
+                            login
+			    options))
               entries)))
     (setq tabulated-list-entries (nreverse entries)))
   (tabulated-list-init-header)
@@ -215,6 +221,7 @@ become irrelevant if `ssh-tunnels-configurations' changes.")
            (if error-if-does-not-exist
                (error "No tunnel on this line")))
           (t tunnel))))
+
 
 (defun ssh-tunnels-run (&optional arg)
   (interactive "P")
@@ -249,33 +256,108 @@ become irrelevant if `ssh-tunnels-configurations' changes.")
   (cond ((eq key :host)
          (or (cl-getf tunnel :host) "localhost"))
         ((eq key :local-port)
-         (or (gethash (cl-getf tunnel :name) ssh-tunnels--state-table)
+         (or (if (equal "none" (ssh-tunnels--property tunnel :tunnel-type)) 0)
+	     (gethash (cl-getf tunnel :name) ssh-tunnels--state-table)
              (cl-getf tunnel :local-port)
              (cl-getf tunnel :remote-port)))
         ((eq key :remote-port)
-         (or (cl-getf tunnel :remote-port)
+         (or (if (equal "none" (ssh-tunnels--property tunnel :tunnel-type)) 0)
+	     (if (equal "dynamic" (ssh-tunnels--property tunnel :tunnel-type)) 0)
+	     (cl-getf tunnel :remote-port)
              (cl-getf tunnel :local-port)))
+	((eq key :tunnel-type)
+	 (cl-getf tunnel key "local"))
         (t
          (cl-getf tunnel key))))
 
-(defun ssh-tunnels--command (tunnel command)
-  (let* ((name (ssh-tunnels--property tunnel :name))
-         (local-port (ssh-tunnels--property tunnel :local-port))
+(defun ssh-tunnels--tunnel-options-constructor (tunnel)
+  (let* ((local-port (ssh-tunnels--property tunnel :local-port))
          (remote-port (ssh-tunnels--property tunnel :remote-port))
          (host (ssh-tunnels--property tunnel :host))
+	 (tunnel-type (ssh-tunnels--property tunnel :tunnel-type))
+	 (tunnel-options (ssh-tunnels--property tunnel :options)))
+    (append
+     (if tunnel-options (list "-o" (format "%s" tunnel-options)) '())
+     (list "-M" "-f" "-N" "-T")
+     (cond
+      ((or (equal tunnel-type "dynamic") (equal host "dynamic"))
+       (list "-D" (format "%s" local-port)))
+      ((equal tunnel-type "none") '())
+      ((equal tunnel-type "remote")
+       (list "-R" (format "%s:%s:%s" remote-port host local-port)))
+      (t
+       (list
+	"-L"
+	(format "%s:%s:%s" local-port host remote-port)))))))
+
+(defun eshell-command-on-list (ssh-cmd rest-command) 
+  "Execute the ssh  command  COMMAND using eshell."
+  (save-excursion
+    (let ((buf (set-buffer (generate-new-buffer " *ssh eshell cmd*")))
+	  (eshell-non-interactive-p t))
+      (eshell-mode)
+      (let* ((proc (eshell-eval-command
+		    (list 'eshell-commands
+			  (list 'eshell-trap-errors (list 'eshell-named-command ssh-cmd (append '(list) rest-command))))))
+	     intr
+	     (bufname (if (and proc (listp proc))
+			  "*EShell Async Command Output*"
+			(setq intr t)
+			"*EShell Command Output*")))
+	(if (buffer-live-p (get-buffer bufname))
+	    (kill-buffer bufname))
+	(rename-buffer bufname)
+	;; things get a little coarse here, since the desire is to
+	;; make the output as attractive as possible, with no
+	;; extraneous newlines
+	(when intr
+	  (if (eshell-interactive-process)
+	      (eshell-wait-for-process (eshell-interactive-process)))
+	  (cl-assert (not (eshell-interactive-process)))
+	  (goto-char (point-max))
+	  (while (and (bolp) (not (bobp)))
+	    (delete-char -1)))
+	(cl-assert (and buf (buffer-live-p buf)))
+	(let ((len (if (not intr) 2
+		     (count-lines (point-min) (point-max)))))
+	  (cond
+	   ((= len 0)
+	    (message "(There was no command output)")
+	    (kill-buffer buf))
+	   ((= len 1)
+	    (message "%s" (buffer-string))
+	    (kill-buffer buf))
+	   (t
+	    (save-selected-window
+	      (select-window (display-buffer buf))
+	      (goto-char (point-min))
+	      ;; cause the output buffer to take up as little screen
+	      ;; real-estate as possible, if temp buffer resizing is
+	      ;; enabled
+	      (and intr temp-buffer-resize-mode
+		   (resize-temp-buffer-window))))))))))
+
+(setq ssh-tunnels:custom-password "")
+(defun ssh-tunnels--command (tunnel command)
+  (let* ((name (ssh-tunnels--property tunnel :name))
          (login (ssh-tunnels--property tunnel :login))
          (args (cond ((eq command :run)
-                      (list "-M" "-f" "-N" "-T"
-                            "-L" (format "%s:%s:%s" local-port host remote-port)))
+		      (ssh-tunnels--tunnel-options-constructor tunnel))
                      ((eq command :kill)
                       (list "-O" "exit"))
                      ((eq command :check)
                       (list "-O" "check"))
                      (t (error "Unknown ssh-tunnels command '%s'" command)))))
-    (apply 'call-process ssh-tunnels-program nil nil nil
-           "-S" (shell-quote-argument name)
-           (append args
-                   (list login)))))
+    (message "run ssh %s" args)
+    (if (eq command :run)
+	(let ()
+	  (setq ssh-tunnels:custom-password (read-passwd (format "%s Password: " login)))
+	  (apply `call-process "~/bin/emacs-ssh-helper.sh" nil nil nil
+		 (append (list ssh-tunnels-program) args
+			 (list login))))
+	(apply 'call-process ssh-tunnels-program nil nil nil
+	       (append args
+		       (list login))))))
 
 (defun ssh-tunnels--run (tunnel)
   (remhash (ssh-tunnels--property tunnel :name)
