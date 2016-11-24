@@ -290,53 +290,6 @@ become irrelevant if `ssh-tunnels-configurations' changes.")
 	"-L"
 	(format "%s:%s:%s" local-port host remote-port)))))))
 
-(defun eshell-command-on-list (ssh-cmd rest-command) 
-  "Execute the ssh  command  COMMAND using eshell."
-  (save-excursion
-    (let ((buf (set-buffer (generate-new-buffer " *ssh eshell cmd*")))
-	  (eshell-non-interactive-p t))
-      (eshell-mode)
-      (let* ((proc (eshell-eval-command
-		    (list 'eshell-commands
-			  (list 'eshell-trap-errors (list 'eshell-named-command ssh-cmd (append '(list) rest-command))))))
-	     intr
-	     (bufname (if (and proc (listp proc))
-			  "*EShell Async Command Output*"
-			(setq intr t)
-			"*EShell Command Output*")))
-	(if (buffer-live-p (get-buffer bufname))
-	    (kill-buffer bufname))
-	(rename-buffer bufname)
-	;; things get a little coarse here, since the desire is to
-	;; make the output as attractive as possible, with no
-	;; extraneous newlines
-	(when intr
-	  (if (eshell-interactive-process)
-	      (eshell-wait-for-process (eshell-interactive-process)))
-	  (cl-assert (not (eshell-interactive-process)))
-	  (goto-char (point-max))
-	  (while (and (bolp) (not (bobp)))
-	    (delete-char -1)))
-	(cl-assert (and buf (buffer-live-p buf)))
-	(let ((len (if (not intr) 2
-		     (count-lines (point-min) (point-max)))))
-	  (cond
-	   ((= len 0)
-	    (message "(There was no command output)")
-	    (kill-buffer buf))
-	   ((= len 1)
-	    (message "%s" (buffer-string))
-	    (kill-buffer buf))
-	   (t
-	    (save-selected-window
-	      (select-window (display-buffer buf))
-	      (goto-char (point-min))
-	      ;; cause the output buffer to take up as little screen
-	      ;; real-estate as possible, if temp buffer resizing is
-	      ;; enabled
-	      (and intr temp-buffer-resize-mode
-		   (resize-temp-buffer-window))))))))))
-
 (setq ssh-tunnels:custom-password "")
 (defun ssh-tunnels--command (tunnel command)
   (let* ((name (ssh-tunnels--property tunnel :name))
