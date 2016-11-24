@@ -303,8 +303,10 @@ become irrelevant if `ssh-tunnels-configurations' changes.")
                      (t (error "Unknown ssh-tunnels command '%s'" command)))))
     (message "run ssh %s" args)
     (if (eq command :run)
-	(let ()
-	  (setq ssh-tunnels:custom-password (read-passwd (format "%s Password: " login)))
+	(let ((t-pro-passwd (ssh-tunnels--property tunnel :passwd)))
+	  (if t-pro-passwd
+	      (setq ssh-tunnels:custom-password t-pro-passwd)
+	    (setq ssh-tunnels:custom-password  (read-passwd (format "%s Password: " login))))
 	  (apply `call-process "~/bin/emacs-ssh-helper.sh" nil nil nil
 		 (append (list ssh-tunnels-program) args
 			 (list login))))
